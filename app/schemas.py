@@ -161,10 +161,12 @@ class SurveyResponse(BaseModel):
 class RawTextIngest(BaseModel):
     title: str
     content: str
+    verification_level: Optional[str] = "COMMUNITY_SOURCE"
 
 class UrlIngest(BaseModel):
     title: str
     url: str
+    verification_level: Optional[str] = "COMMUNITY_SOURCE"
 
 class SchemeCreate(BaseModel):
     scheme_name: str
@@ -179,6 +181,7 @@ class SchemeCreate(BaseModel):
     source_page: Optional[int] = 1
     source_urls: Optional[List[str]] = None
     verification_status: Optional[str] = "UNVERIFIED"
+    verification_level: Optional[str] = "COMMUNITY_SOURCE"
 
 class SchemeUpdate(BaseModel):
     scheme_name: Optional[str] = None
@@ -197,6 +200,7 @@ class SchemeUpdate(BaseModel):
     is_archived: Optional[bool] = None
     version_source: Optional[str] = None
     change_summary: Optional[str] = None
+    verification_level: Optional[str] = None
 
 class SchemeResponse(BaseModel):
     id: Any
@@ -216,6 +220,7 @@ class SchemeResponse(BaseModel):
     is_active: bool
     is_archived: bool
     version: int
+    verification_level: str
     created_at: datetime
     updated_at: datetime
 
@@ -236,6 +241,7 @@ class SchemeVersionHistoryResponse(BaseModel):
     required_documents: List[str]
     application_process: str
     source_urls: Optional[List[str]] = None
+    verification_level: str
     version_source: Optional[str] = None
     change_summary: Optional[str] = None
     created_at: datetime
@@ -267,6 +273,31 @@ class ChatResponse(BaseModel):
     response: str
     recommendations: List[EligibleSchemeRecommendation]
     retrieved_sources: List[Dict[str, Any]]
+
+class ChatFeedbackRequest(BaseModel):
+    rating: str
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, value: str) -> str:
+        valid_ratings = {"HELPFUL", "NOT_HELPFUL"}
+        if value not in valid_ratings:
+            raise ValueError(f"Feedback rating must be one of {valid_ratings}")
+        return value
+
+class BenchmarkLogResponse(BaseModel):
+    id: Any
+    session_id: Optional[str] = None
+    citizen_profile: Optional[Dict[str, Any]] = None
+    question: str
+    retrieved_chunks: List[Dict[str, Any]]
+    llm_response: str
+    latency_ms: int
+    feedback: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # --- Citizen CRM Schemas ---

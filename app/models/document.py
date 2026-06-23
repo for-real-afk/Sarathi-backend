@@ -19,5 +19,6 @@ class KnowledgeDocument(Base):
     source_url = Column(String(1024), nullable=True)
     storage_path = Column(String(1024), nullable=True)
     content = Column(Text, nullable=False)
+    verification_level = Column(String(50), default="COMMUNITY_SOURCE", nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -69,6 +69,7 @@ class SchemeRegistry(Base):
     is_active = Column(Boolean, default=True, nullable=False)  # New
     is_archived = Column(Boolean, default=False, nullable=False)  # New
     version = Column(Integer, default=1, nullable=False)  # New
+    verification_level = Column(String(50), default="COMMUNITY_SOURCE", nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -100,6 +101,7 @@ class SchemeVersionHistory(Base):
     required_documents = Column(JSON_TYPE, nullable=False)
     application_process = Column(Text, nullable=False)
     source_urls = Column(JSON_TYPE, nullable=True)
+    verification_level = Column(String(50), default="COMMUNITY_SOURCE", nullable=False)
     
     version_source = Column(String(255), nullable=True)  # manual edit, web scrape, etc.
     change_summary = Column(Text, nullable=True)  # changed threshold, initial upload etc.

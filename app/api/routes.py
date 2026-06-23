@@ -23,7 +23,9 @@ from app.schemas import (
     SchemeVersionHistoryResponse,
     ChatRequest,
     ChatResponse,
-    EligibleSchemeRecommendation
+    EligibleSchemeRecommendation,
+    ChatFeedbackRequest,
+    BenchmarkLogResponse
 )
 from app.services.document_parser import DocumentParserService
 from app.services.embedding import LocalBGEM3EmbeddingProvider
@@ -80,6 +82,7 @@ def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
+    verification_level: Optional[str] = Form("COMMUNITY_SOURCE"),
     db: Session = Depends(get_db)
 ):
     """
@@ -95,7 +98,7 @@ def upload_document(
         file_ext = os.path.splitext(file.filename)[1].lower()
         content = ""
         doc_title = title or file.filename
-
+ 
         # Parse based on file extension
         if file_ext == ".pdf":
             pages = DocumentParserService.parse_pdf(temp_file_path)
@@ -110,24 +113,25 @@ def upload_document(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported file format: {file_ext}. Only PDF, DOCX, TXT, MD are allowed."
             )
-
+ 
         if not content.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Extracted document content is empty."
             )
-
+ 
         # Create Document record
         doc = KnowledgeDocument(
             title=doc_title,
             file_type=file_ext.replace(".", "").upper(),
             storage_path=temp_file_path,
-            content=content
+            content=content,
+            verification_level=verification_level
         )
         db.add(doc)
         db.commit()
         db.refresh(doc)
-
+ 
         # Offload parsing and embedding to background task factory
         background_tasks.add_task(
             parse_and_index_document,
@@ -136,7 +140,7 @@ def upload_document(
             llm_provider,
             embedding_provider
         )
-
+ 
         return {
             "message": "Document upload accepted. Scheme extraction is executing in the background.",
             "document_id": str(doc.id),
@@ -149,8 +153,8 @@ def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to ingest document: {str(e)}"
         )
-
-
+ 
+ 
 @router.post("/documents/raw-text", status_code=status.HTTP_202_ACCEPTED)
 def ingest_raw_text(
     payload: RawTextIngest,
@@ -163,12 +167,13 @@ def ingest_raw_text(
     doc = KnowledgeDocument(
         title=payload.title,
         file_type="RAW_TEXT",
-        content=payload.content
+        content=payload.content,
+        verification_level=payload.verification_level
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
-
+ 
     background_tasks.add_task(
         parse_and_index_document,
         SessionLocal,
@@ -176,14 +181,14 @@ def ingest_raw_text(
         llm_provider,
         embedding_provider
     )
-
+ 
     return {
         "message": "Raw text accepted. Scheme extraction is executing in the background.",
         "document_id": str(doc.id),
         "title": doc.title
     }
-
-
+ 
+ 
 @router.post("/documents/url", status_code=status.HTTP_202_ACCEPTED)
 def ingest_url(
     payload: UrlIngest,
@@ -191,7 +196,7 @@ def ingest_url(
     db: Session = Depends(get_db)
 ):
     """
-    Scrapes a URL, ingests text content, and schedules schema extraction.
+    Scrapes a URL, ingests text content, and schedules scheme extraction.
     """
     try:
         content = DocumentParserService.parse_url(payload.url)
@@ -199,12 +204,13 @@ def ingest_url(
             title=payload.title,
             file_type="URL",
             source_url=payload.url,
-            content=content
+            content=content,
+            verification_level=payload.verification_level
         )
         db.add(doc)
         db.commit()
         db.refresh(doc)
-
+ 
         background_tasks.add_task(
             parse_and_index_document,
             SessionLocal,
@@ -212,7 +218,7 @@ def ingest_url(
             llm_provider,
             embedding_provider
         )
-
+ 
         return {
             "message": "URL content scraped. Scheme extraction is executing in the background.",
             "document_id": str(doc.id),
@@ -628,3 +634,30 @@ def chat_flow(payload: ChatRequest, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Chat Completions Error: {str(err)}\n{traceback.format_exc()}"
         )
+
+
+@router.post("/chat/{log_id}/feedback", response_model=Dict[str, Any])
+def submit_chat_feedback(log_id: str, payload: ChatFeedbackRequest, db: Session = Depends(get_db)):
+    """
+    Submits user feedback (HELPFUL or NOT_HELPFUL) for a specific chat log.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(log_id) if is_postgres else str(log_id)
+    
+    log = db.query(ChatLog).filter(ChatLog.id == query_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Chat log not found")
+        
+    log.feedback = payload.rating
+    db.commit()
+    db.refresh(log)
+    return {"message": "Feedback recorded successfully", "log_id": str(log.id), "feedback": log.feedback}
+
+
+@router.get("/admin/chat-logs/benchmark", response_model=List[BenchmarkLogResponse])
+def get_benchmark_dataset(db: Session = Depends(get_db)):
+    """
+    Retrieve all RAG chat logs to formulate a benchmark evaluation dataset.
+    """
+    logs = db.query(ChatLog).order_by(ChatLog.created_at.desc()).all()
+    return logs

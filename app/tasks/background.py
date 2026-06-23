@@ -57,7 +57,8 @@ def parse_and_index_document(
                 required_documents=structured_data["required_documents"],
                 application_process=structured_data["application_process"],
                 source_page=structured_data["source_page"],
-                verification_status=structured_data["verification_status"]
+                verification_status=structured_data["verification_status"],
+                verification_level=doc.verification_level
             )
             
             # Check for name collisions, delete old matching scheme if present to allow re-indexing
@@ -91,7 +92,8 @@ def parse_and_index_document(
                     "category": scheme.category,
                     "source": doc.title,
                     "source_page": scheme.source_page,
-                    "verification_status": scheme.verification_status
+                    "verification_status": scheme.verification_status,
+                    "verification_level": doc.verification_level
                 }
 
                 chunk = SchemeChunk(
