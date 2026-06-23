@@ -5,19 +5,99 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db, engine, Base
+from app.database import get_db, engine, Base, SessionLocal
 from app.models import Survey, KnowledgeDocument, SchemeRegistry, SchemeChunk, ChatLog
 from app.schemas import SurveyCreate, SurveyUpdate, SurveyResponse
 from app.api.routes import router as api_router
 
-# Automatically bootstrap database tables on startup if migrations haven't run
+# Import auth services and routers
+from app.services.auth import seed_database
+from app.api.auth import router as auth_router
+from app.api.protected_routes import router as protected_router
+
+import jwt
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import JSONResponse
+
+# Automatically bootstrap database tables on startup
 Base.metadata.create_all(bind=engine)
+
+# Seed database with roles, permissions, and default accounts
+db = SessionLocal()
+try:
+    seed_database(db)
+finally:
+    db.close()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Backend API for storing and managing Household Welfare Surveys."
 )
 
+# Custom Authorization Middleware for RBAC
+class AuthorizationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Bypass OPTIONS requests for CORS preflight
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        path = request.url.path
+        required_roles = None
+
+        # Check path prefixes for required roles
+        if path.startswith("/admin") or path.startswith("/api/admin"):
+            required_roles = ["ADMIN"]
+        elif path.startswith("/volunteers") or path.startswith("/api/volunteers"):
+            required_roles = ["ADMIN", "CENTRAL_HUB", "LOCAL_HUB"]
+        elif path.startswith("/citizens") or path.startswith("/api/citizens"):
+            required_roles = ["ADMIN", "CENTRAL_HUB", "LOCAL_HUB", "VOLUNTEER"]
+        elif path.startswith("/cases") or path.startswith("/api/cases"):
+            required_roles = ["ADMIN", "CENTRAL_HUB", "LOCAL_HUB", "VOLUNTEER", "CITIZEN"]
+
+        if required_roles is not None:
+            auth_header = request.headers.get("Authorization")
+            if not auth_header or not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing or invalid authorization credentials."}
+                )
+            
+            token = auth_header.split(" ")[1]
+            try:
+                payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+                user_id = payload.get("sub")
+                roles = payload.get("roles", [])
+                
+                # Check if user has at least one of the required roles
+                if not any(role in required_roles for role in roles):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": f"Forbidden: Access denied. Required roles: {required_roles}."}
+                    )
+                
+                # Expose user context on request.state
+                request.state.user_id = user_id
+                request.state.roles = roles
+
+            except jwt.ExpiredSignatureError:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Token has expired."}
+                )
+            except jwt.PyJWTError:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid token."}
+                )
+
+        return await call_next(request)
+
+# Add Middleware
+app.add_middleware(AuthorizationMiddleware)
+
+# Register Routers
+app.include_router(auth_router)
+app.include_router(protected_router)
 app.include_router(api_router, tags=["RAG & Welfare Intelligence"])
 
 
