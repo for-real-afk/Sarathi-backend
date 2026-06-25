@@ -1,8 +1,9 @@
 import uuid
 import json
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, TypeDecorator, JSON
+from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, TypeDecorator, JSON, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from app.database import Base, engine
 
 # Safe postgresql vs sqlite type selection
@@ -53,6 +54,7 @@ class SchemeRegistry(Base):
     document_id = Column(UUID_TYPE, ForeignKey("knowledge_documents.id", ondelete="SET NULL"), nullable=True)
     scheme_name = Column(String(255), unique=True, nullable=False, index=True)
     state = Column(String(100), nullable=False, index=True)
+    department = Column(String(255), nullable=True, index=True)  # New
     category = Column(String(100), nullable=False, index=True)
     description = Column(Text, nullable=False)
     benefits = Column(JSON_TYPE, nullable=False)  # Benefit details
@@ -60,7 +62,15 @@ class SchemeRegistry(Base):
     required_documents = Column(JSON_TYPE, nullable=False)  # List of strings
     application_process = Column(Text, nullable=False)
     source_page = Column(Integer, nullable=True)
+    source_urls = Column(JSON_TYPE, nullable=True)  # New
     verification_status = Column(String(50), default="UNVERIFIED")  # VERIFIED, UNVERIFIED, DRAFT
+    
+    # Status & Version Controls
+    is_active = Column(Boolean, default=True, nullable=False)  # New
+    is_archived = Column(Boolean, default=False, nullable=False)  # New
+    version = Column(Integer, default=1, nullable=False)  # New
+    verification_level = Column(String(50), default="COMMUNITY_SOURCE", nullable=False)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -74,4 +84,29 @@ class SchemeChunk(Base):
     embedding = Column(VECTOR_TYPE, nullable=True)
     chunk_metadata = Column(JSON_TYPE, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class SchemeVersionHistory(Base):
+    __tablename__ = "scheme_version_history"
+
+    id = Column(UUID_TYPE, primary_key=True, default=lambda: str(uuid.uuid4()) if not is_postgres else uuid.uuid4)
+    scheme_id = Column(UUID_TYPE, ForeignKey("scheme_registry.id", ondelete="CASCADE"), nullable=False)
+    version = Column(Integer, nullable=False)
+    scheme_name = Column(String(255), nullable=False)
+    state = Column(String(100), nullable=False)
+    department = Column(String(255), nullable=True)
+    category = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False)
+    benefits = Column(JSON_TYPE, nullable=False)
+    eligibility_rules = Column(JSON_TYPE, nullable=False)
+    required_documents = Column(JSON_TYPE, nullable=False)
+    application_process = Column(Text, nullable=False)
+    source_urls = Column(JSON_TYPE, nullable=True)
+    verification_level = Column(String(50), default="COMMUNITY_SOURCE", nullable=False)
+    
+    version_source = Column(String(255), nullable=True)  # manual edit, web scrape, etc.
+    change_summary = Column(Text, nullable=True)  # changed threshold, initial upload etc.
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    scheme = relationship("SchemeRegistry")
+
 

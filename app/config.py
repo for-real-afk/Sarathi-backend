@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GEMINI_MODEL: str = "gemini-1.5-flash"
     AWS_BEDROCK_MODEL: str = "anthropic.claude-3-sonnet-20240229-v1:0"
+    
+    # JWT & Authentication configuration
+    JWT_SECRET_KEY: str = "secret-key-change-in-production-for-saarthi"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
 
     @field_validator("CORS_ORIGINS", mode="before")

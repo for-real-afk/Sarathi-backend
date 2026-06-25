@@ -12,16 +12,20 @@ logger = logging.getLogger("uvicorn.error")
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.models.document import KnowledgeDocument
-from app.models.scheme import SchemeRegistry, SchemeChunk
+from app.models.scheme import SchemeRegistry, SchemeChunk, SchemeVersionHistory
 from app.models.chat_log import ChatLog
 from app.schemas import (
     RawTextIngest,
     UrlIngest,
     SchemeCreate,
     SchemeUpdate,
+    SchemeResponse,
+    SchemeVersionHistoryResponse,
     ChatRequest,
     ChatResponse,
-    EligibleSchemeRecommendation
+    EligibleSchemeRecommendation,
+    ChatFeedbackRequest,
+    BenchmarkLogResponse
 )
 from app.services.document_parser import DocumentParserService
 from app.services.embedding import LocalBGEM3EmbeddingProvider
@@ -78,6 +82,7 @@ def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
+    verification_level: Optional[str] = Form("COMMUNITY_SOURCE"),
     db: Session = Depends(get_db)
 ):
     """
@@ -93,7 +98,7 @@ def upload_document(
         file_ext = os.path.splitext(file.filename)[1].lower()
         content = ""
         doc_title = title or file.filename
-
+ 
         # Parse based on file extension
         if file_ext == ".pdf":
             pages = DocumentParserService.parse_pdf(temp_file_path)
@@ -108,24 +113,25 @@ def upload_document(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unsupported file format: {file_ext}. Only PDF, DOCX, TXT, MD are allowed."
             )
-
+ 
         if not content.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Extracted document content is empty."
             )
-
+ 
         # Create Document record
         doc = KnowledgeDocument(
             title=doc_title,
             file_type=file_ext.replace(".", "").upper(),
             storage_path=temp_file_path,
-            content=content
+            content=content,
+            verification_level=verification_level
         )
         db.add(doc)
         db.commit()
         db.refresh(doc)
-
+ 
         # Offload parsing and embedding to background task factory
         background_tasks.add_task(
             parse_and_index_document,
@@ -134,7 +140,7 @@ def upload_document(
             llm_provider,
             embedding_provider
         )
-
+ 
         return {
             "message": "Document upload accepted. Scheme extraction is executing in the background.",
             "document_id": str(doc.id),
@@ -147,8 +153,8 @@ def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to ingest document: {str(e)}"
         )
-
-
+ 
+ 
 @router.post("/documents/raw-text", status_code=status.HTTP_202_ACCEPTED)
 def ingest_raw_text(
     payload: RawTextIngest,
@@ -161,12 +167,13 @@ def ingest_raw_text(
     doc = KnowledgeDocument(
         title=payload.title,
         file_type="RAW_TEXT",
-        content=payload.content
+        content=payload.content,
+        verification_level=payload.verification_level
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
-
+ 
     background_tasks.add_task(
         parse_and_index_document,
         SessionLocal,
@@ -174,14 +181,14 @@ def ingest_raw_text(
         llm_provider,
         embedding_provider
     )
-
+ 
     return {
         "message": "Raw text accepted. Scheme extraction is executing in the background.",
         "document_id": str(doc.id),
         "title": doc.title
     }
-
-
+ 
+ 
 @router.post("/documents/url", status_code=status.HTTP_202_ACCEPTED)
 def ingest_url(
     payload: UrlIngest,
@@ -189,7 +196,7 @@ def ingest_url(
     db: Session = Depends(get_db)
 ):
     """
-    Scrapes a URL, ingests text content, and schedules schema extraction.
+    Scrapes a URL, ingests text content, and schedules scheme extraction.
     """
     try:
         content = DocumentParserService.parse_url(payload.url)
@@ -197,12 +204,13 @@ def ingest_url(
             title=payload.title,
             file_type="URL",
             source_url=payload.url,
-            content=content
+            content=content,
+            verification_level=payload.verification_level
         )
         db.add(doc)
         db.commit()
         db.refresh(doc)
-
+ 
         background_tasks.add_task(
             parse_and_index_document,
             SessionLocal,
@@ -210,7 +218,7 @@ def ingest_url(
             llm_provider,
             embedding_provider
         )
-
+ 
         return {
             "message": "URL content scraped. Scheme extraction is executing in the background.",
             "document_id": str(doc.id),
@@ -265,7 +273,7 @@ def delete_document(id: str, db: Session = Depends(get_db)):
 
 # --- 2. ADMIN CRUD SCHEME REGISTRY ENDPOINTS ---
 
-@router.post("/admin/schemes", status_code=status.HTTP_201_CREATED)
+@router.post("/admin/schemes", response_model=SchemeResponse, status_code=status.HTTP_201_CREATED)
 def create_scheme(payload: SchemeCreate, db: Session = Depends(get_db)):
     """
     Allows administrator to manually register a new welfare scheme.
@@ -276,13 +284,39 @@ def create_scheme(payload: SchemeCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Scheme name already registered.")
         
     scheme = SchemeRegistry(**payload.model_dump())
+    scheme.version = 1
+    scheme.is_active = True
+    scheme.is_archived = False
+    
     db.add(scheme)
     db.commit()
     db.refresh(scheme)
+    
+    # Create version history record
+    history = SchemeVersionHistory(
+        scheme_id=scheme.id,
+        version=scheme.version,
+        scheme_name=scheme.scheme_name,
+        state=scheme.state,
+        department=scheme.department,
+        category=scheme.category,
+        description=scheme.description,
+        benefits=scheme.benefits,
+        eligibility_rules=scheme.eligibility_rules,
+        required_documents=scheme.required_documents,
+        application_process=scheme.application_process,
+        source_urls=scheme.source_urls,
+        version_source="manual edit",
+        change_summary="Initial registration"
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(scheme)
+    
     return scheme
 
 
-@router.get("/admin/schemes")
+@router.get("/admin/schemes", response_model=List[SchemeResponse])
 def list_schemes(db: Session = Depends(get_db)):
     """
     Lists all registered schemes.
@@ -290,7 +324,7 @@ def list_schemes(db: Session = Depends(get_db)):
     return db.query(SchemeRegistry).all()
 
 
-@router.get("/admin/schemes/{id}")
+@router.get("/admin/schemes/{id}", response_model=SchemeResponse)
 def get_scheme(id: str, db: Session = Depends(get_db)):
     """
     Fetches details for a single scheme.
@@ -303,7 +337,7 @@ def get_scheme(id: str, db: Session = Depends(get_db)):
     return scheme
 
 
-@router.put("/admin/schemes/{id}")
+@router.put("/admin/schemes/{id}", response_model=SchemeResponse)
 def update_scheme(id: str, payload: SchemeUpdate, db: Session = Depends(get_db)):
     """
     Allows admin to modify details and eligibility rules of a registered scheme.
@@ -315,12 +349,127 @@ def update_scheme(id: str, payload: SchemeUpdate, db: Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="Scheme not found")
         
     update_data = payload.model_dump(exclude_unset=True)
-    for k, v in update_data.items():
-        setattr(scheme, k, v)
+    
+    version_source = update_data.pop("version_source", "manual edit")
+    change_summary = update_data.pop("change_summary", "Scheme updated")
+    
+    if update_data:
+        for k, v in update_data.items():
+            setattr(scheme, k, v)
+            
+        scheme.version += 1
+        db.commit()
+        db.refresh(scheme)
         
+        # Save version history log
+        history = SchemeVersionHistory(
+            scheme_id=scheme.id,
+            version=scheme.version,
+            scheme_name=scheme.scheme_name,
+            state=scheme.state,
+            department=scheme.department,
+            category=scheme.category,
+            description=scheme.description,
+            benefits=scheme.benefits,
+            eligibility_rules=scheme.eligibility_rules,
+            required_documents=scheme.required_documents,
+            application_process=scheme.application_process,
+            source_urls=scheme.source_urls,
+            version_source=version_source,
+            change_summary=change_summary
+        )
+        db.add(history)
+        db.commit()
+        db.refresh(scheme)
+        
+    return scheme
+
+
+@router.put("/admin/schemes/{id}/disable", response_model=SchemeResponse)
+def disable_scheme(id: str, db: Session = Depends(get_db)):
+    """
+    Disable a scheme.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(id) if is_postgres else str(id)
+    scheme = db.query(SchemeRegistry).filter(SchemeRegistry.id == query_id).first()
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    
+    scheme.is_active = False
     db.commit()
     db.refresh(scheme)
     return scheme
+
+
+@router.put("/admin/schemes/{id}/enable", response_model=SchemeResponse)
+def enable_scheme(id: str, db: Session = Depends(get_db)):
+    """
+    Enable a scheme.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(id) if is_postgres else str(id)
+    scheme = db.query(SchemeRegistry).filter(SchemeRegistry.id == query_id).first()
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    
+    scheme.is_active = True
+    db.commit()
+    db.refresh(scheme)
+    return scheme
+
+
+@router.put("/admin/schemes/{id}/archive", response_model=SchemeResponse)
+def archive_scheme(id: str, db: Session = Depends(get_db)):
+    """
+    Archive a scheme.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(id) if is_postgres else str(id)
+    scheme = db.query(SchemeRegistry).filter(SchemeRegistry.id == query_id).first()
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    
+    scheme.is_archived = True
+    db.commit()
+    db.refresh(scheme)
+    return scheme
+
+
+@router.put("/admin/schemes/{id}/unarchive", response_model=SchemeResponse)
+def unarchive_scheme(id: str, db: Session = Depends(get_db)):
+    """
+    Unarchive a scheme.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(id) if is_postgres else str(id)
+    scheme = db.query(SchemeRegistry).filter(SchemeRegistry.id == query_id).first()
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+    
+    scheme.is_archived = False
+    db.commit()
+    db.refresh(scheme)
+    return scheme
+
+
+@router.get("/admin/schemes/{id}/history", response_model=List[SchemeVersionHistoryResponse])
+def get_scheme_history(id: str, db: Session = Depends(get_db)):
+    """
+    Returns the version history for a given scheme, sorted by version descending.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(id) if is_postgres else str(id)
+    
+    scheme = db.query(SchemeRegistry).filter(SchemeRegistry.id == query_id).first()
+    if not scheme:
+        raise HTTPException(status_code=404, detail="Scheme not found")
+        
+    history_records = db.query(SchemeVersionHistory).filter(
+        SchemeVersionHistory.scheme_id == query_id
+    ).order_by(SchemeVersionHistory.version.desc()).all()
+    
+    return history_records
 
 
 @router.delete("/admin/schemes/{id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -485,3 +634,30 @@ def chat_flow(payload: ChatRequest, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Chat Completions Error: {str(err)}\n{traceback.format_exc()}"
         )
+
+
+@router.post("/chat/{log_id}/feedback", response_model=Dict[str, Any])
+def submit_chat_feedback(log_id: str, payload: ChatFeedbackRequest, db: Session = Depends(get_db)):
+    """
+    Submits user feedback (HELPFUL or NOT_HELPFUL) for a specific chat log.
+    """
+    is_postgres = (db.bind.dialect.name == "postgresql")
+    query_id = uuid.UUID(log_id) if is_postgres else str(log_id)
+    
+    log = db.query(ChatLog).filter(ChatLog.id == query_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Chat log not found")
+        
+    log.feedback = payload.rating
+    db.commit()
+    db.refresh(log)
+    return {"message": "Feedback recorded successfully", "log_id": str(log.id), "feedback": log.feedback}
+
+
+@router.get("/admin/chat-logs/benchmark", response_model=List[BenchmarkLogResponse])
+def get_benchmark_dataset(db: Session = Depends(get_db)):
+    """
+    Retrieve all RAG chat logs to formulate a benchmark evaluation dataset.
+    """
+    logs = db.query(ChatLog).order_by(ChatLog.created_at.desc()).all()
+    return logs
